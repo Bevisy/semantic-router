@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/responseapi"
 )
@@ -35,6 +36,21 @@ func TestExtractSignalConversationHistory_ChatCompletionsMixedRoles(t *testing.T
 	assert.Equal(t, []string{"first question"}, history.priorUserMessages)
 	assert.Equal(t, []string{"System prompt", "first answer"}, history.nonUserMessages)
 	assert.True(t, history.hasAssistantReply)
+}
+
+func TestExtractSignalConversationHistory_FlowToolStateRequiresTrailingResult(t *testing.T) {
+	req := &openai.ChatCompletionNewParams{
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage("run the workflow"),
+			openai.ToolMessage("done", "flowtool_deadbeef__call_1"),
+		},
+	}
+	history := extractSignalConversationHistory(req)
+	assert.True(t, history.lastMessageFlowToolResult)
+
+	req.Messages = append(req.Messages, openai.UserMessage("new request"))
+	history = extractSignalConversationHistory(req)
+	assert.False(t, history.lastMessageFlowToolResult)
 }
 
 func TestExtractToolTransitionContextFromRequest_ChatCompletionsNoToolCalls(t *testing.T) {
@@ -92,6 +108,29 @@ func TestExtractSignalConversationHistoryMarksUserAfterToolResult(t *testing.T) 
 	assert.Equal(t, "user", history.lastMessageRole)
 	assert.False(t, history.lastMessageToolResult)
 	assert.True(t, history.lastUserAfterToolResult)
+}
+
+func TestExtractSignalConversationHistoryBoundsPendingToolCallToTail(t *testing.T) {
+	req := &openai.ChatCompletionNewParams{
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			assistantToolCallMessage("lookup"),
+			openai.UserMessage("start a separate task"),
+			openai.AssistantMessage("done"),
+			openai.UserMessage("ordinary follow-up"),
+		},
+	}
+
+	history := extractSignalConversationHistory(req)
+
+	assert.Equal(t, 1, history.assistantToolCallCount)
+	assert.Zero(t, history.toolResultCount)
+	assert.False(t, history.lastAssistantToolCall)
+	assert.False(t, conversationFactsIndicateActiveToolLoop(classification.ConversationFacts{
+		AssistantToolCallCount: history.assistantToolCallCount,
+		ToolResultCount:        history.toolResultCount,
+		LastMessageRole:        history.lastMessageRole,
+		LastAssistantToolCall:  history.lastAssistantToolCall,
+	}))
 }
 
 func TestToolTransitionContextFromConversationHistoryPreservesAllToolsWhenWindowUnset(t *testing.T) {

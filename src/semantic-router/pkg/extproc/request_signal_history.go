@@ -3,6 +3,7 @@ package extproc
 import (
 	"github.com/openai/openai-go"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/looper"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/tools"
 )
 
@@ -18,19 +19,21 @@ type signalConversationHistory struct {
 	contextHasNonText      bool
 
 	// Conversation-shape facts for the conversation signal family.
-	hasDeveloperMessage     bool
-	userMessageCount        int
-	assistantMessageCount   int
-	systemMessageCount      int
-	toolMessageCount        int
-	toolDefinitionCount     int
-	assistantToolCallCount  int
-	toolResultCount         int
-	imageContentCount       int
-	assistantToolNames      []string
-	lastMessageRole         string
-	lastMessageToolResult   bool
-	lastUserAfterToolResult bool
+	hasDeveloperMessage       bool
+	userMessageCount          int
+	assistantMessageCount     int
+	systemMessageCount        int
+	toolMessageCount          int
+	toolDefinitionCount       int
+	assistantToolCallCount    int
+	toolResultCount           int
+	imageContentCount         int
+	assistantToolNames        []string
+	lastMessageRole           string
+	lastMessageToolResult     bool
+	lastMessageFlowToolResult bool
+	lastAssistantToolCall     bool
+	lastUserAfterToolResult   bool
 }
 
 func signalConversationHistoryFromFastExtract(result *FastExtractResult) signalConversationHistory {
@@ -38,28 +41,30 @@ func signalConversationHistoryFromFastExtract(result *FastExtractResult) signalC
 		return signalConversationHistory{}
 	}
 	return signalConversationHistory{
-		currentUserMessage:      result.UserContent,
-		priorUserMessages:       append([]string(nil), result.PriorUserMessages...),
-		nonUserMessages:         append([]string(nil), result.NonUserMessages...),
-		hasAssistantReply:       result.HasAssistantReply,
-		metadata:                cloneRoutingMetadata(result.Metadata),
-		contextTokenFloor:       result.ContextTokenFloor,
-		contextTextBytes:        result.ContextTextBytes,
-		contextEquivalentBytes:  result.ContextEquivalentBytes,
-		contextHasNonText:       result.ContextHasNonText,
-		hasDeveloperMessage:     result.HasDeveloperMessage,
-		userMessageCount:        result.UserMessageCount,
-		assistantMessageCount:   result.AssistantMessageCount,
-		systemMessageCount:      result.SystemMessageCount,
-		toolMessageCount:        result.ToolMessageCount,
-		toolDefinitionCount:     result.ToolDefinitionCount,
-		assistantToolCallCount:  result.AssistantToolCallCount,
-		toolResultCount:         result.ToolResultCount,
-		imageContentCount:       result.ImageContentCount,
-		assistantToolNames:      append([]string(nil), result.AssistantToolNames...),
-		lastMessageRole:         result.LastMessageRole,
-		lastMessageToolResult:   result.LastMessageToolResult,
-		lastUserAfterToolResult: result.LastUserAfterToolResult,
+		currentUserMessage:        result.UserContent,
+		priorUserMessages:         append([]string(nil), result.PriorUserMessages...),
+		nonUserMessages:           append([]string(nil), result.NonUserMessages...),
+		hasAssistantReply:         result.HasAssistantReply,
+		metadata:                  cloneRoutingMetadata(result.Metadata),
+		contextTokenFloor:         result.ContextTokenFloor,
+		contextTextBytes:          result.ContextTextBytes,
+		contextEquivalentBytes:    result.ContextEquivalentBytes,
+		contextHasNonText:         result.ContextHasNonText,
+		hasDeveloperMessage:       result.HasDeveloperMessage,
+		userMessageCount:          result.UserMessageCount,
+		assistantMessageCount:     result.AssistantMessageCount,
+		systemMessageCount:        result.SystemMessageCount,
+		toolMessageCount:          result.ToolMessageCount,
+		toolDefinitionCount:       result.ToolDefinitionCount,
+		assistantToolCallCount:    result.AssistantToolCallCount,
+		toolResultCount:           result.ToolResultCount,
+		imageContentCount:         result.ImageContentCount,
+		assistantToolNames:        append([]string(nil), result.AssistantToolNames...),
+		lastMessageRole:           result.LastMessageRole,
+		lastMessageToolResult:     result.LastMessageToolResult,
+		lastMessageFlowToolResult: result.LastMessageFlowToolResult,
+		lastAssistantToolCall:     result.LastAssistantToolCall,
+		lastUserAfterToolResult:   result.LastUserAfterToolResult,
 	}
 }
 
@@ -107,6 +112,8 @@ func consumeSignalConversationMessage(msg openai.ChatCompletionMessageParamUnion
 	role, textContent := extractMessageRoleAndContent(msg)
 	history.lastMessageRole = role
 	history.lastMessageToolResult = false
+	history.lastMessageFlowToolResult = false
+	history.lastAssistantToolCall = false
 	history.lastUserAfterToolResult = false
 
 	switch role {
@@ -124,6 +131,9 @@ func consumeSignalConversationMessage(msg openai.ChatCompletionMessageParamUnion
 		history.toolMessageCount++
 		history.toolResultCount++
 		history.lastMessageToolResult = true
+		if msg.OfTool != nil {
+			history.lastMessageFlowToolResult = looper.IsWorkflowToolCallID(msg.OfTool.ToolCallID)
+		}
 	}
 }
 
@@ -147,7 +157,9 @@ func consumeSignalConversationAssistantMessage(
 	history.assistantMessageCount++
 	recordSignalConversationNonUserMessage(textContent, history)
 	history.hasAssistantReply = true
-	history.assistantToolCallCount += len(msg.OfAssistant.ToolCalls)
+	toolCallCount := len(msg.OfAssistant.ToolCalls)
+	history.assistantToolCallCount += toolCallCount
+	history.lastAssistantToolCall = toolCallCount > 0
 	history.assistantToolNames = append(history.assistantToolNames, toolNamesFromAssistantMessage(msg)...)
 }
 

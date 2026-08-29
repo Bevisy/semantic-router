@@ -394,6 +394,7 @@ export function getSignalFieldSchema(signalType: string): FieldSchema[] {
                     'assistant_tool_call',
                     'assistant_tool_cycle',
                     'active_tool_loop',
+                    'flow_tool_state',
                   ],
                   required: true,
                 },

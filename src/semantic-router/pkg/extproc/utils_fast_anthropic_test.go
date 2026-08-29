@@ -187,6 +187,9 @@ func TestExtractContentFastAnthropic_ToolUseCountedOnAssistant(t *testing.T) {
 	if got.AssistantToolCallCount != 2 {
 		t.Fatalf("assistant tool calls: got %d, want 2", got.AssistantToolCallCount)
 	}
+	if !got.LastAssistantToolCall {
+		t.Fatal("trailing assistant tool_use should mark an active tool-call tail")
+	}
 	if len(got.AssistantToolNames) != 2 || got.AssistantToolNames[0] != "web_search" || got.AssistantToolNames[1] != "calc" {
 		t.Fatalf("assistant tool names: got %+v", got.AssistantToolNames)
 	}
@@ -219,6 +222,74 @@ func TestExtractContentFastAnthropic_ToolResultCountedOnUser(t *testing.T) {
 	}
 	if got.UserContent != "search" {
 		t.Fatalf("user content: got %q, want %q", got.UserContent, "search")
+	}
+	if got.LastAssistantToolCall {
+		t.Fatal("a trailing tool_result must replace the assistant tool-call tail")
+	}
+}
+
+func TestExtractContentFastAnthropic_HistoricalUnmatchedToolUseDoesNotStayActive(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-opus-4-7",
+		"messages":[
+			{"role":"assistant","content":[{
+				"type":"tool_use","id":"old-call","name":"lookup","input":{}
+			}]},
+			{"role":"user","content":"start a separate task"},
+			{"role":"assistant","content":"done"},
+			{"role":"user","content":"ordinary follow-up"}
+		]
+	}`)
+	got, err := extractContentFastAnthropic(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.AssistantToolCallCount != 1 || got.ToolResultCount != 0 {
+		t.Fatalf("aggregate tool counts: got %d/%d, want 1/0", got.AssistantToolCallCount, got.ToolResultCount)
+	}
+	if got.LastAssistantToolCall || got.LastMessageToolResult || got.LastUserAfterToolResult {
+		t.Fatal("historical unmatched tool_use must not mark a later user turn active")
+	}
+}
+
+func TestExtractContentFastAnthropic_FlowToolStateRequiresTrailingResult(t *testing.T) {
+	flowBody := []byte(`{
+		"model":"claude-opus-4-7",
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"flowtool_deadbeef__call_1",
+				"content":"done"
+			}]
+		}]
+	}`)
+	result, err := extractContentFastAnthropic(flowBody)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.LastMessageFlowToolResult {
+		t.Fatal("expected trailing Flow tool result to expose resumable state")
+	}
+
+	historicalBody := []byte(`{
+		"model":"claude-opus-4-7",
+		"messages":[
+			{"role":"user","content":[{
+				"type":"tool_result",
+				"tool_use_id":"flowtool_deadbeef__call_1",
+				"content":"done"
+			}]},
+			{"role":"assistant","content":"workflow complete"},
+			{"role":"user","content":"new request"}
+		]
+	}`)
+	result, err = extractContentFastAnthropic(historicalBody)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LastMessageFlowToolResult {
+		t.Fatal("historical Flow tool result must not resume a workflow")
 	}
 }
 

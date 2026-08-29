@@ -7,6 +7,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/looper"
 )
 
 // extractContentFastAnthropic mirrors extractContentFast for the Anthropic
@@ -99,6 +100,8 @@ func consumeFastExtractAnthropicMessage(msg gjson.Result, result *FastExtractRes
 	content := msg.Get("content")
 	result.LastMessageRole = role
 	result.LastMessageToolResult = false
+	result.LastMessageFlowToolResult = false
+	result.LastAssistantToolCall = false
 	result.LastUserAfterToolResult = false
 
 	text := extractAnthropicTextFromContent(content)
@@ -117,14 +120,33 @@ func consumeFastExtractAnthropicMessage(msg gjson.Result, result *FastExtractRes
 			result.ToolMessageCount++
 			result.ToolResultCount++
 			result.LastMessageToolResult = true
+			result.LastMessageFlowToolResult = anthropicContentHasWorkflowToolResult(content)
 		}
 	case "assistant":
 		result.AssistantMessageCount++
 		recordFastExtractNonUserMessage(result, role, text)
 		if hasToolUse {
-			countAnthropicAssistantToolUses(content, result)
+			result.LastAssistantToolCall = countAnthropicAssistantToolUses(content, result) > 0
 		}
 	}
+}
+
+func anthropicContentHasWorkflowToolResult(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	found := false
+	content.ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() != "tool_result" {
+			return true
+		}
+		if looper.IsWorkflowToolCallID(block.Get("tool_use_id").String()) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func recordAnthropicUserMessage(result *FastExtractResult, text string, content gjson.Result) {
@@ -155,20 +177,23 @@ func countAnthropicImageBlocks(content gjson.Result) int {
 	return count
 }
 
-func countAnthropicAssistantToolUses(content gjson.Result, result *FastExtractResult) {
+func countAnthropicAssistantToolUses(content gjson.Result, result *FastExtractResult) int {
 	if !content.IsArray() {
-		return
+		return 0
 	}
+	count := 0
 	content.ForEach(func(_, block gjson.Result) bool {
 		if block.Get("type").String() != "tool_use" {
 			return true
 		}
+		count++
 		result.AssistantToolCallCount++
 		if name := block.Get("name").String(); name != "" {
 			result.AssistantToolNames = append(result.AssistantToolNames, name)
 		}
 		return true
 	})
+	return count
 }
 
 // extractAnthropicTextFromContent collects the text payload from an

@@ -8,6 +8,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/looper"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
 
@@ -37,18 +38,20 @@ type FastExtractResult struct {
 	ContextHasNonText      bool
 
 	// Conversation-shape fields for the conversation signal family.
-	HasDeveloperMessage     bool
-	UserMessageCount        int
-	AssistantMessageCount   int
-	SystemMessageCount      int
-	ToolMessageCount        int
-	ToolDefinitionCount     int
-	AssistantToolCallCount  int
-	ToolResultCount         int
-	AssistantToolNames      []string
-	LastMessageRole         string
-	LastMessageToolResult   bool
-	LastUserAfterToolResult bool
+	HasDeveloperMessage       bool
+	UserMessageCount          int
+	AssistantMessageCount     int
+	SystemMessageCount        int
+	ToolMessageCount          int
+	ToolDefinitionCount       int
+	AssistantToolCallCount    int
+	ToolResultCount           int
+	AssistantToolNames        []string
+	LastMessageRole           string
+	LastMessageToolResult     bool
+	LastMessageFlowToolResult bool
+	LastAssistantToolCall     bool
+	LastUserAfterToolResult   bool
 }
 
 // extractContentFast extracts model, stream, message content, and the first
@@ -185,6 +188,8 @@ func consumeFastExtractMessage(msg gjson.Result, result *FastExtractResult) {
 	text := extractTextFromContent(content)
 	result.LastMessageRole = role
 	result.LastMessageToolResult = false
+	result.LastMessageFlowToolResult = false
+	result.LastAssistantToolCall = false
 	result.LastUserAfterToolResult = false
 
 	switch role {
@@ -198,7 +203,7 @@ func consumeFastExtractMessage(msg gjson.Result, result *FastExtractResult) {
 	case "assistant":
 		result.AssistantMessageCount++
 		recordFastExtractNonUserMessage(result, role, text)
-		countAssistantToolCalls(msg, result)
+		result.LastAssistantToolCall = countAssistantToolCalls(msg, result) > 0
 	case "developer":
 		result.HasDeveloperMessage = true
 		recordFastExtractNonUserMessage(result, role, text)
@@ -206,21 +211,25 @@ func consumeFastExtractMessage(msg gjson.Result, result *FastExtractResult) {
 		result.ToolMessageCount++
 		result.ToolResultCount++
 		result.LastMessageToolResult = true
+		result.LastMessageFlowToolResult = looper.IsWorkflowToolCallID(msg.Get("tool_call_id").String())
 	}
 }
 
-func countAssistantToolCalls(msg gjson.Result, result *FastExtractResult) {
+func countAssistantToolCalls(msg gjson.Result, result *FastExtractResult) int {
 	toolCalls := msg.Get("tool_calls")
 	if !toolCalls.Exists() || !toolCalls.IsArray() {
-		return
+		return 0
 	}
+	count := 0
 	toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+		count++
 		result.AssistantToolCallCount++
 		if name := toolCall.Get("function.name").String(); name != "" {
 			result.AssistantToolNames = append(result.AssistantToolNames, name)
 		}
 		return true
 	})
+	return count
 }
 
 func recordFastExtractUserMessage(result *FastExtractResult, text string, content gjson.Result) {

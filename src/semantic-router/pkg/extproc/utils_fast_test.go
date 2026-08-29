@@ -655,6 +655,7 @@ func TestExtractContentFast_ConversationFacts(t *testing.T) {
 	assert.Equal(t, 3, r.AssistantToolCallCount, "three tool_calls total (2+1)")
 	assert.Equal(t, []string{"read_file", "list_dir", "write_file"}, r.AssistantToolNames, "tool call names should preserve conversation order")
 	assert.Equal(t, 3, r.ToolResultCount, "three tool results")
+	assert.False(t, r.LastAssistantToolCall, "a later system turn closes the tool-call tail")
 	assert.False(t, r.LastUserAfterToolResult, "last message is not a user continuation after tool output")
 }
 
@@ -715,6 +716,7 @@ func TestExtractContentFast_PendingAssistantToolCallIsNotToolResult(t *testing.T
 	assert.Zero(t, r.ToolResultCount)
 	assert.Equal(t, "assistant", r.LastMessageRole)
 	assert.False(t, r.LastMessageToolResult)
+	assert.True(t, r.LastAssistantToolCall)
 	assert.False(t, r.LastUserAfterToolResult)
 }
 
