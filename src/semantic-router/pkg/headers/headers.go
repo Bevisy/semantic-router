@@ -429,3 +429,22 @@ const (
 	//nolint:gosec
 	VSRLooperTotalTokens = "x-vsr-looper-total-tokens"
 )
+
+// HopByHopDropList is the set of HTTP framing headers that must be stripped
+// from the semantic request view before any downstream filter or body-phase
+// routing sees them. Shared by every transport adapter (ExtProc, standalone
+// gateway) so header trust stays consistent across adapters. Envoy already
+// strips most of these before ExtProc receives the request; adapters re-apply
+// the policy as defense-in-depth and to keep the contract explicit in code.
+var HopByHopDropList = []string{
+	"host",
+	"content-length",
+	"connection",
+	"keep-alive",
+	"proxy-connection",
+	"transfer-encoding",
+	"upgrade",
+	"te",
+	"trailer",
+	"expect",
+}

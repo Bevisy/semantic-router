@@ -29,9 +29,21 @@ func (r *OpenAIRouter) handleRequestBody(
 	v *ext_proc.ProcessingRequest_RequestBody,
 	ctx *RequestContext,
 ) (*ext_proc.ProcessingResponse, error) {
+	return r.processRequestBodyCore(v.RequestBody.GetBody(), ctx)
+}
+
+// processRequestBodyCore runs the buffered request pipeline over a plain
+// body, independent of any transport wire type. Both the Envoy ExtProc
+// adapter (handleRequestBody) and the standalone HTTP gateway drive this
+// same core, so routing/plugin behavior cannot diverge between the two
+// binaries (#1138: shared routing input/output contracts carry no Envoy
+// protobuf dependency).
+func (r *OpenAIRouter) processRequestBodyCore(
+	body []byte,
+	ctx *RequestContext,
+) (*ext_proc.ProcessingResponse, error) {
 	ctx.ProcessingStartTime = time.Now()
-	requestBody := v.RequestBody.GetBody()
-	request, earlyResponse := r.prepareProtocolRequest(requestBody, ctx)
+	request, earlyResponse := r.prepareProtocolRequest(body, ctx)
 	if earlyResponse != nil {
 		return earlyResponse, nil
 	}

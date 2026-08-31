@@ -12,7 +12,20 @@ import (
 
 // handleResponseBody processes the response body.
 func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_ResponseBody, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
-	if skipResponse := r.handleSkipProcessingResponseBody(v.ResponseBody.Body, ctx); skipResponse != nil {
+	return r.processResponseBodyCore(v.ResponseBody.Body, v.ResponseBody.GetEndOfStream(), ctx)
+}
+
+// processResponseBodyCore runs the response-side semantic pipeline over a
+// plain body, independent of any transport wire type. Both the Envoy ExtProc
+// adapter (handleResponseBody) and the standalone HTTP gateway drive this
+// same core so the res_filter pipeline (jailbreak/hallucination, usage,
+// memory, caching) cannot diverge between the two binaries (#1138).
+func (r *OpenAIRouter) processResponseBodyCore(
+	responseBody []byte,
+	endOfStream bool,
+	ctx *RequestContext,
+) (*ext_proc.ProcessingResponse, error) {
+	if skipResponse := r.handleSkipProcessingResponseBody(responseBody, ctx); skipResponse != nil {
 		return skipResponse, nil
 	}
 
@@ -21,17 +34,16 @@ func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_Response
 	// Decrement active request count for queue depth estimation.
 	defer metrics.DecrementModelActiveRequests(ctx.RequestModel)
 
-	if looperResponse := r.handleLooperResponseBody(v.ResponseBody.Body, ctx); looperResponse != nil {
+	if looperResponse := r.handleLooperResponseBody(responseBody, ctx); looperResponse != nil {
 		return looperResponse, nil
 	}
 
-	responseBody := v.ResponseBody.Body
 	if isUpstreamTransportError(ctx) {
 		return r.handleUpstreamTransportError(responseBody, ctx), nil
 	}
 
 	if ctx.IsStreamingResponse {
-		return r.handleSemanticStreamingResponseBody(responseBody, v.ResponseBody.GetEndOfStream(), ctx), nil
+		return r.handleSemanticStreamingResponseBody(responseBody, endOfStream, ctx), nil
 	}
 	recoveredBody, recoveryErr := r.handleContextRecoveryFollowup(
 		ctx.TraceContext,

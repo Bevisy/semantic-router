@@ -38,6 +38,9 @@ func main() {
 		failStartup(startupWriter, "Failed to start management API: %v", err)
 	}
 
+	// Ensure any locally-served models are present before starting the router.
+	// cmd/gateway (the standalone HTTP gateway) is a separate binary and does
+	// not go through this startup sequence.
 	ensureModelsDownloadedOrFatal(cfg, startupWriter)
 	exitIfDownloadOnly(opts.downloadOnly)
 

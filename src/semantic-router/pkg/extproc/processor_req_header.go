@@ -185,24 +185,6 @@ func buildIdentityEncodingRequestMutation() *ext_proc.HeaderMutation {
 	}
 }
 
-// hopByHopDropList is the set of HTTP framing headers we strip from
-// ctx.Headers before any downstream filter or body-phase routing sees
-// them. Envoy already strips most of these from the request before
-// extproc receives it; we re-apply the policy as defense-in-depth and
-// to make the contract explicit in code.
-var hopByHopDropList = []string{
-	"host",
-	"content-length",
-	"connection",
-	"keep-alive",
-	"proxy-connection",
-	"transfer-encoding",
-	"upgrade",
-	"te",
-	"trailer",
-	"expect",
-}
-
 // applyHeaderPassThroughPolicy enforces the request-header pass-through
 // contract by stripping transport framing from the semantic request view.
 // Provider headers are supplied by the selected provider profile rather than
@@ -212,7 +194,7 @@ func applyHeaderPassThroughPolicy(ctx *RequestContext) {
 		return
 	}
 
-	for _, name := range hopByHopDropList {
+	for _, name := range headers.HopByHopDropList {
 		delete(ctx.Headers, name)
 	}
 }
