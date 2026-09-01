@@ -136,6 +136,7 @@ func (ImagesCodec) DecodeResponse(body []byte, _ llmprotocol.Policy) (llmprotoco
 			return llmprotocol.Response{}, llmprotocol.Envelope{}, nil, invalidUpstreamResponse(fmt.Errorf("images response item %d has no b64 payload", index))
 		}
 		output = append(output, llmprotocol.OutputItem{
+			ID:   llmprotocol.StableID("images-output", fmt.Sprint(wire.Created), fmt.Sprint(index)),
 			Role: llmprotocol.RoleAssistant,
 			Content: []llmprotocol.Content{{
 				Kind: llmprotocol.ContentGeneratedImage,
@@ -147,8 +148,11 @@ func (ImagesCodec) DecodeResponse(body []byte, _ llmprotocol.Policy) (llmprotoco
 		})
 	}
 	response := llmprotocol.Response{
-		CreatedAt: time.Unix(wire.Created, 0),
-		Output:    output,
+		Generation: 1,
+		ID:         llmprotocol.StableID("images-response", fmt.Sprint(wire.Created)),
+		CreatedAt:  time.Unix(wire.Created, 0),
+		Output:     output,
+		Usage:      llmprotocol.Usage{State: llmprotocol.UsageUnavailable},
 	}
 	return response, llmprotocol.Envelope{}, nil, nil
 }

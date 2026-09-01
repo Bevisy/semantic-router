@@ -1,6 +1,7 @@
 package protocolcodec
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -150,5 +151,31 @@ func TestRegistryCoordinatesImagesFormat(t *testing.T) {
 	})
 	if !set.Contains(required) {
 		t.Fatalf("images wire capabilities %v must contain required %v", set.Names(), required.Names())
+	}
+}
+
+// The engine must translate a DALL-E body all the way to the responses wire:
+// decode via the images codec, then render image_generation_call for the
+// client. Guards the semantic-generation and render path used by the Router's
+// response pipe (generation_required regression).
+func TestImagesEngineTranslatestoResponsesImageGenerationCall(t *testing.T) {
+	engine, err := NewEngine(NewBuiltinRegistry(), llmprotocol.DefaultPolicy())
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	body := []byte(`{"created":1701234567,"data":[{"b64_json":"aGVsbG8td29ybGQ="}]}`)
+	result, err := engine.TranslateResponse(llmprotocol.OpenAIImagesV1, llmprotocol.OpenAIResponsesV1, body, nil)
+	if err != nil {
+		t.Fatalf("TranslateResponse: %v", err)
+	}
+	if len(result.Response.Output) != 1 {
+		t.Fatalf("output len = %d, want 1", len(result.Response.Output))
+	}
+	block := result.Response.Output[0].Content[0]
+	if block.Kind != llmprotocol.ContentGeneratedImage || block.GeneratedImage == nil || block.GeneratedImage.Result == nil {
+		t.Fatalf("expected generated image with result, got %+v", block)
+	}
+	if !bytes.Contains(result.Body, []byte(`"type":"image_generation_call"`)) {
+		t.Fatalf("client body must render image_generation_call, got: %.400s", result.Body)
 	}
 }
