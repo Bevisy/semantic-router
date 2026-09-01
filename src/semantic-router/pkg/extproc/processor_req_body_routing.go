@@ -118,6 +118,25 @@ func (r *OpenAIRouter) rejectDispatchCapabilityMismatch(
 	return nil
 }
 
+// declaredModelCapabilities parses a model's configured capability
+// declarations. A model with no declaration (or an unparseable one) is treated
+// as unannotated and stays eligible on wire expressibility alone; the declared
+// filter only steers among annotated candidates.
+func (r *OpenAIRouter) declaredModelCapabilities(model string) (llmprotocol.CapabilitySet, bool) {
+	if r == nil || r.Config == nil {
+		return llmprotocol.CapabilitySet{}, false
+	}
+	params, ok := r.Config.ModelConfig[model]
+	if !ok || len(params.Capabilities) == 0 {
+		return llmprotocol.CapabilitySet{}, false
+	}
+	declared, err := llmprotocol.ParseCapabilities(params.Capabilities)
+	if err != nil {
+		return llmprotocol.CapabilitySet{}, false
+	}
+	return declared, true
+}
+
 // rerouteToQualifiedDecisionModel tries to satisfy the required capabilities
 // by dispatching to another modelRef offered by the selected decision, when
 // the originally selected model's wire format cannot express them. It returns
@@ -150,6 +169,9 @@ func (r *OpenAIRouter) rerouteToQualifiedDecisionModel(
 			continue
 		}
 		if set, ok := r.codecCapabilitiesForFormat(format); !ok || !set.Contains(required) {
+			continue
+		}
+		if declared, ok := r.declaredModelCapabilities(model); ok && !declared.Contains(required.TaskCapabilities()) {
 			continue
 		}
 		candidate, err := r.resolveProviderDispatch(model, decision.Name, selected.useReasoning)

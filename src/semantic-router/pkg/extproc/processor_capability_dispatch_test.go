@@ -129,6 +129,121 @@ func TestEntrypointRoutingSurfacesCapabilityMismatchAsProtocolError(t *testing.T
 	}
 }
 
+// When candidate modelRefs declare capabilities, a candidate is only taken if
+// its declared capabilities cover the request's task (modality) capabilities.
+func TestPrepareProviderDispatchPrefersCapabilityAnnotatedModelRef(t *testing.T) {
+	router, primary := routingTestRouterForFormat(llmprotocol.OpenAIChatV1)
+	visionOnly := "fallback-vision"
+	generator := "fallback-generator"
+	router.Config.ModelConfig[visionOnly] = config.ModelParams{
+		PreferredEndpoints: []string{"backend"},
+		APIFormat:          config.APIFormatResponses,
+		Capabilities:       []string{"image_input"},
+		ExternalModelIDs:   map[string]string{"vllm": "provider-vision"},
+	}
+	router.Config.ModelConfig[generator] = config.ModelParams{
+		PreferredEndpoints: []string{"backend"},
+		APIFormat:          config.APIFormatResponses,
+		Capabilities:       []string{"image_generation"},
+		ExternalModelIDs:   map[string]string{"vllm": "provider-generator"},
+	}
+	decision := &config.Decision{
+		Name: "Omni",
+		ModelRefs: []config.ModelRef{
+			{Model: primary},
+			{Model: visionOnly},
+			{Model: generator},
+		},
+	}
+	request := testNeutralRequest(primary, "draw a cat")
+	request.ToolChoice = llmprotocol.ToolChoice{Mode: llmprotocol.ToolChoiceImageGeneration}
+	ctx := routingTestContext(llmprotocol.OpenAIChatV1, request)
+	ctx.VSRSelectedDecision = decision
+
+	dispatch, err := router.prepareProviderDispatch(request, primary, decision.Name, false, ctx)
+	if err != nil {
+		t.Fatalf("expected reroute to generator, got error: %v", err)
+	}
+	if dispatch.logicalModel != generator {
+		t.Fatalf("logical model = %s, want %s (must skip declared vision-only candidate)", dispatch.logicalModel, generator)
+	}
+}
+
+// A declared candidate that cannot cover the required task capability is
+// skipped, and an undeclared candidate (wire-only qualification) is taken.
+func TestPrepareProviderDispatchSkipsDeclaredMismatchAndFallsBackToWireOnly(t *testing.T) {
+	router, primary := routingTestRouterForFormat(llmprotocol.OpenAIChatV1)
+	visionOnly := "fallback-vision"
+	undeclared := "fallback-undeclared"
+	router.Config.ModelConfig[visionOnly] = config.ModelParams{
+		PreferredEndpoints: []string{"backend"},
+		APIFormat:          config.APIFormatResponses,
+		Capabilities:       []string{"image_input"},
+		ExternalModelIDs:   map[string]string{"vllm": "provider-vision"},
+	}
+	router.Config.ModelConfig[undeclared] = config.ModelParams{
+		PreferredEndpoints: []string{"backend"},
+		APIFormat:          config.APIFormatResponses,
+		ExternalModelIDs:   map[string]string{"vllm": "provider-undeclared"},
+	}
+	decision := &config.Decision{
+		Name: "Omni",
+		ModelRefs: []config.ModelRef{
+			{Model: primary},
+			{Model: visionOnly},
+			{Model: undeclared},
+		},
+	}
+	request := testNeutralRequest(primary, "draw a cat")
+	request.ToolChoice = llmprotocol.ToolChoice{Mode: llmprotocol.ToolChoiceImageGeneration}
+	ctx := routingTestContext(llmprotocol.OpenAIChatV1, request)
+	ctx.VSRSelectedDecision = decision
+
+	dispatch, err := router.prepareProviderDispatch(request, primary, decision.Name, false, ctx)
+	if err != nil {
+		t.Fatalf("expected reroute to undeclared candidate, got error: %v", err)
+	}
+	if dispatch.logicalModel != undeclared {
+		t.Fatalf("logical model = %s, want %s", dispatch.logicalModel, undeclared)
+	}
+}
+
+// When every wire-qualified candidate declares capabilities that don't cover
+// the required task, no candidate qualifies and the mismatch surfaces.
+func TestPrepareProviderDispatchRejectsWhenAllDeclaredCandidatesMismatch(t *testing.T) {
+	router, primary := routingTestRouterForFormat(llmprotocol.OpenAIChatV1)
+	visionOnly := "fallback-vision"
+	router.Config.ModelConfig[visionOnly] = config.ModelParams{
+		PreferredEndpoints: []string{"backend"},
+		APIFormat:          config.APIFormatResponses,
+		Capabilities:       []string{"image_input"},
+		ExternalModelIDs:   map[string]string{"vllm": "provider-vision"},
+	}
+	decision := &config.Decision{
+		Name: "Omni",
+		ModelRefs: []config.ModelRef{
+			{Model: primary},
+			{Model: visionOnly},
+		},
+	}
+	request := testNeutralRequest(primary, "draw a cat")
+	request.ToolChoice = llmprotocol.ToolChoice{Mode: llmprotocol.ToolChoiceImageGeneration}
+	ctx := routingTestContext(llmprotocol.OpenAIChatV1, request)
+	ctx.VSRSelectedDecision = decision
+
+	_, err := router.prepareProviderDispatch(request, primary, decision.Name, false, ctx)
+	if err == nil {
+		t.Fatalf("expected capability mismatch error, got nil")
+	}
+	var protocolError *llmprotocol.ProtocolError
+	if !errors.As(err, &protocolError) {
+		t.Fatalf("expected *llmprotocol.ProtocolError, got %T: %v", err, err)
+	}
+	if protocolError.Code != "unsupported_capability" {
+		t.Fatalf("protocol error code = %q, want unsupported_capability", protocolError.Code)
+	}
+}
+
 // When the selected decision offers another modelRef whose wire format can
 // express the required capabilities, dispatch must be re-routed to it instead
 // of surfacing a capability error.
