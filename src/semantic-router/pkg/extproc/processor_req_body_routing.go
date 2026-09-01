@@ -64,8 +64,14 @@ func (r *OpenAIRouter) prepareProviderDispatch(
 	if changed {
 		request.Generation++
 	}
+	required := llmprotocol.RequiredCapabilities(*request)
 	if protocolErr := r.rejectDispatchCapabilityMismatch(request, dispatch.targetFormat, ctx); protocolErr != nil {
-		return nil, protocolErr
+		rerouted, ok := r.rerouteToQualifiedDecisionModel(request, dispatch, required, ctx)
+		if !ok {
+			return nil, protocolErr
+		}
+		dispatch = rerouted
+		ctx.ImmediateProtocolError = nil
 	}
 	ctx.TargetFormat = dispatch.targetFormat
 	ctx.SemanticRequest = request
@@ -110,6 +116,57 @@ func (r *OpenAIRouter) rejectDispatchCapabilityMismatch(
 		return err
 	}
 	return nil
+}
+
+// rerouteToQualifiedDecisionModel tries to satisfy the required capabilities
+// by dispatching to another modelRef offered by the selected decision, when
+// the originally selected model's wire format cannot express them. It returns
+// the re-resolved dispatch and whether a qualified candidate was found.
+//
+// Candidates are considered in modelRef order; the first whose wire format can
+// express every required capability wins. This is capability-driven selection
+// at the dispatch seam: routing prefers a qualified backend over a clean
+// rejection, and only rejects when no candidate qualifies.
+func (r *OpenAIRouter) rerouteToQualifiedDecisionModel(
+	request *llmprotocol.Request,
+	selected *providerDispatch,
+	required llmprotocol.CapabilitySet,
+	ctx *RequestContext,
+) (*providerDispatch, bool) {
+	if r == nil || r.Config == nil || request == nil || selected == nil || ctx == nil {
+		return nil, false
+	}
+	decision := ctx.VSRSelectedDecision
+	if decision == nil || decision.Name == "" {
+		return nil, false
+	}
+	for _, modelRef := range decision.ModelRefs {
+		model := modelRef.Model
+		if model == "" || model == selected.logicalModel {
+			continue
+		}
+		format, err := wireFormatForModel(r.Config.GetModelAPIFormat(model))
+		if err != nil {
+			continue
+		}
+		if set, ok := r.codecCapabilitiesForFormat(format); !ok || !set.Contains(required) {
+			continue
+		}
+		candidate, err := r.resolveProviderDispatch(model, decision.Name, selected.useReasoning)
+		if err != nil {
+			continue
+		}
+		request.Model = candidate.upstreamModel
+		ctx.TargetFormat = candidate.targetFormat
+		logging.ComponentDebugEvent("extproc", "provider_dispatch_rerouted", map[string]interface{}{
+			"request_id":  ctx.RequestID,
+			"from":        selected.logicalModel,
+			"to":          model,
+			"wire_format": candidate.targetFormat,
+		})
+		return candidate, true
+	}
+	return nil, false
 }
 
 func (r *OpenAIRouter) resolveProviderDispatch(

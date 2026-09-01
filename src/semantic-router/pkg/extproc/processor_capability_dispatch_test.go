@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/llmprotocol"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/entropy"
 )
@@ -125,5 +126,77 @@ func TestEntrypointRoutingSurfacesCapabilityMismatchAsProtocolError(t *testing.T
 	}
 	if ctx.ImmediateProtocolError == nil {
 		t.Fatalf("expected ImmediateProtocolError to be set on capability mismatch")
+	}
+}
+
+// When the selected decision offers another modelRef whose wire format can
+// express the required capabilities, dispatch must be re-routed to it instead
+// of surfacing a capability error.
+func TestPrepareProviderDispatchReroutesToCapabilityQualifiedModelRef(t *testing.T) {
+	router, primary := routingTestRouterForFormat(llmprotocol.OpenAIChatV1)
+	fallback := "fallback-responses"
+	router.Config.ModelConfig[fallback] = config.ModelParams{
+		PreferredEndpoints: []string{"backend"},
+		APIFormat:          config.APIFormatResponses,
+		ExternalModelIDs:   map[string]string{"vllm": "provider-fallback"},
+	}
+	decision := &config.Decision{
+		Name: "Omni",
+		ModelRefs: []config.ModelRef{
+			{Model: primary},
+			{Model: fallback},
+		},
+	}
+	request := testNeutralRequest(primary, "draw a cat")
+	request.ToolChoice = llmprotocol.ToolChoice{Mode: llmprotocol.ToolChoiceImageGeneration}
+	ctx := routingTestContext(llmprotocol.OpenAIChatV1, request)
+	ctx.VSRSelectedDecision = decision
+
+	dispatch, err := router.prepareProviderDispatch(request, primary, decision.Name, false, ctx)
+	if err != nil {
+		t.Fatalf("expected reroute to qualified modelRef, got error: %v", err)
+	}
+	if dispatch.logicalModel != fallback {
+		t.Fatalf("logical model = %s, want %s (rerouted)", dispatch.logicalModel, fallback)
+	}
+	if dispatch.targetFormat != llmprotocol.OpenAIResponsesV1 {
+		t.Fatalf("target format = %s, want %s", dispatch.targetFormat, llmprotocol.OpenAIResponsesV1)
+	}
+	if request.Model != "provider-fallback" {
+		t.Fatalf("upstream model = %q, want provider-fallback", request.Model)
+	}
+	if ctx.TargetFormat != llmprotocol.OpenAIResponsesV1 {
+		t.Fatalf("ctx.TargetFormat = %s, want %s", ctx.TargetFormat, llmprotocol.OpenAIResponsesV1)
+	}
+	if ctx.ImmediateProtocolError != nil {
+		t.Fatalf("ImmediateProtocolError must be cleared after a successful reroute")
+	}
+}
+
+// When the decision offers no modelRef that can express the required
+// capability, the capability mismatch must still surface as a ProtocolError.
+func TestPrepareProviderDispatchRejectsWhenNoQualifiedModelRef(t *testing.T) {
+	router, primary := routingTestRouterForFormat(llmprotocol.OpenAIChatV1)
+	decision := &config.Decision{
+		Name: "ChatOnly",
+		ModelRefs: []config.ModelRef{
+			{Model: primary},
+		},
+	}
+	request := testNeutralRequest(primary, "draw a cat")
+	request.ToolChoice = llmprotocol.ToolChoice{Mode: llmprotocol.ToolChoiceImageGeneration}
+	ctx := routingTestContext(llmprotocol.OpenAIChatV1, request)
+	ctx.VSRSelectedDecision = decision
+
+	_, err := router.prepareProviderDispatch(request, primary, decision.Name, false, ctx)
+	if err == nil {
+		t.Fatalf("expected capability mismatch error, got nil")
+	}
+	var protocolError *llmprotocol.ProtocolError
+	if !errors.As(err, &protocolError) {
+		t.Fatalf("expected *llmprotocol.ProtocolError, got %T: %v", err, err)
+	}
+	if protocolError.Code != "unsupported_capability" {
+		t.Fatalf("protocol error code = %q, want unsupported_capability", protocolError.Code)
 	}
 }
