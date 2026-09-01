@@ -315,3 +315,58 @@ func TestPrepareProviderDispatchRejectsWhenNoQualifiedModelRef(t *testing.T) {
 		t.Fatalf("protocol error code = %q, want unsupported_capability", protocolError.Code)
 	}
 }
+
+// A DALL-E (images) sibling is a qualified reroute target for a hosted
+// image_generation request: its wire advertises image_generation and the
+// hosted-tool tools requirement.
+func TestPrepareProviderDispatchReroutesToImagesWireSibling(t *testing.T) {
+	router, primary := routingTestRouterForFormat(llmprotocol.OpenAIChatV1)
+	imageBackend := "image-backend"
+	router.Config.ModelConfig[imageBackend] = config.ModelParams{
+		PreferredEndpoints: []string{"backend"},
+		APIFormat:          config.APIFormatImages,
+		ExternalModelIDs:   map[string]string{"vllm": "provider-image"},
+	}
+	decision := &config.Decision{
+		Name: "Omni",
+		ModelRefs: []config.ModelRef{
+			{Model: primary},
+			{Model: imageBackend},
+		},
+	}
+	request := testNeutralRequest(primary, "draw a cat")
+	request.ToolChoice = llmprotocol.ToolChoice{Mode: llmprotocol.ToolChoiceImageGeneration}
+	request.ImageGeneration = &llmprotocol.ImageGenerationOptions{Size: "1024x1024"}
+	ctx := routingTestContext(llmprotocol.OpenAIChatV1, request)
+	ctx.VSRSelectedDecision = decision
+
+	dispatch, err := router.prepareProviderDispatch(request, primary, decision.Name, false, ctx)
+	if err != nil {
+		t.Fatalf("expected reroute to images sibling, got error: %v", err)
+	}
+	if dispatch.logicalModel != imageBackend {
+		t.Fatalf("logical model = %s, want %s (rerouted to images backend)", dispatch.logicalModel, imageBackend)
+	}
+	if dispatch.targetFormat != llmprotocol.OpenAIImagesV1 {
+		t.Fatalf("target format = %s, want %s", dispatch.targetFormat, llmprotocol.OpenAIImagesV1)
+	}
+	if ctx.TargetFormat != llmprotocol.OpenAIImagesV1 {
+		t.Fatalf("ctx.TargetFormat = %s, want %s", ctx.TargetFormat, llmprotocol.OpenAIImagesV1)
+	}
+}
+
+func TestWireFormatForImagesAPIFormat(t *testing.T) {
+	format, err := wireFormatForModel(config.APIFormatImages)
+	if err != nil {
+		t.Fatalf("wireFormatForModel(images): %v", err)
+	}
+	if format != llmprotocol.OpenAIImagesV1 {
+		t.Fatalf("format = %s, want %s", format, llmprotocol.OpenAIImagesV1)
+	}
+}
+
+func TestRequestWirePathForImagesFormat(t *testing.T) {
+	if path := requestWirePath(llmprotocol.OpenAIImagesV1); path != "/v1/images/generations" {
+		t.Fatalf("wire path = %q, want /v1/images/generations", path)
+	}
+}
