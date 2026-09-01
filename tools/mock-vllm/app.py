@@ -1,3 +1,4 @@
+import base64
 import json
 import math
 import time
@@ -239,6 +240,124 @@ def response_texts(item: dict[str, Any]) -> list[str]:
         if isinstance(part, dict) and isinstance(part.get("text"), str):
             texts.append(part["text"])
     return texts
+
+
+def response_requests_image_generation(body: dict[str, Any]) -> bool:
+    tool_choice = body.get("tool_choice")
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "image_generation":
+        return True
+    if tool_choice == "image_generation":
+        return True
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        return any(
+            isinstance(tool, dict) and tool.get("type") == "image_generation"
+            for tool in tools
+        )
+    return False
+
+
+def build_responses_image_generation_response(body: dict[str, Any]) -> dict[str, Any]:
+    item = {
+        "type": "image_generation_call",
+        "id": "ig_mock_" + uuid.uuid4().hex,
+        "status": "completed",
+        "result": base64.urlsafe_b64encode(b"mock-generated-image").decode(),
+    }
+    return {
+        "id": "resp_image_mock_" + uuid.uuid4().hex,
+        "object": "response",
+        "created_at": int(time.time()),
+        "model": body.get("model", ""),
+        "status": "completed",
+        "error": None,
+        "incomplete_details": None,
+        "output": [item],
+        "parallel_tool_calls": False,
+        "tool_choice": body.get("tool_choice", "auto"),
+        "tools": body.get("tools", []),
+        "usage": build_responses_usage(body, "generated image"),
+    }
+
+
+def generate_responses_image_generation_stream(body: dict[str, Any]) -> Iterator[str]:
+    response_id = "resp_image_mock_" + uuid.uuid4().hex
+    item_id = "ig_mock_" + uuid.uuid4().hex
+    result = base64.urlsafe_b64encode(b"mock-generated-image").decode()
+    created_at = int(time.time())
+
+    def response_resource(status: str, item: dict[str, Any] | None) -> dict[str, Any]:
+        return {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "model": body.get("model", ""),
+            "status": status,
+            "output": [] if item is None else [item],
+        }
+
+    in_progress_item = {
+        "type": "image_generation_call",
+        "id": item_id,
+        "status": "in_progress",
+        "result": None,
+    }
+    completed_item = {
+        "type": "image_generation_call",
+        "id": item_id,
+        "status": "completed",
+        "result": result,
+    }
+
+    def partial(index: int) -> dict[str, Any]:
+        return {
+            "partial_image_index": index,
+            "partial_image_b64": base64.b64encode(f"partial-{index}".encode()).decode(),
+            "size": "1024x1024",
+            "quality": "high",
+            "background": "transparent",
+            "output_format": "png",
+        }
+
+    events = [
+        ("response.created", {"response": response_resource("in_progress", None)}),
+        (
+            "response.output_item.added",
+            {"output_index": 0, "item": in_progress_item},
+        ),
+        (
+            "response.image_generation_call.in_progress",
+            {"output_index": 0, "item_id": item_id},
+        ),
+        (
+            "response.image_generation_call.generating",
+            {"output_index": 0, "item_id": item_id},
+        ),
+        (
+            "response.image_generation_call.partial_image",
+            {"output_index": 0, "item_id": item_id, **partial(0)},
+        ),
+        (
+            "response.image_generation_call.partial_image",
+            {"output_index": 0, "item_id": item_id, **partial(1)},
+        ),
+        (
+            "response.image_generation_call.completed",
+            {"output_index": 0, "item_id": item_id},
+        ),
+        ("response.output_item.done", {"output_index": 0, "item": completed_item}),
+        (
+            "response.completed",
+            {
+                "response": {
+                    **response_resource("completed", completed_item),
+                    "usage": build_responses_usage(body, "generated image"),
+                }
+            },
+        ),
+    ]
+    for sequence, (event, payload) in enumerate(events):
+        yield responses_sse(event, {"sequence_number": sequence, **payload})
 
 
 def build_responses_echo(body: dict[str, Any]) -> str:
@@ -772,6 +891,14 @@ async def responses(request: Request):
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
             )
         return build_responses_tool_response(body)
+    if response_requests_image_generation(body):
+        if body.get("stream"):
+            return StreamingResponse(
+                generate_responses_image_generation_stream(body),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+        return build_responses_image_generation_response(body)
     response, item_id = build_responses_response(body)
     if not body.get("stream"):
         return response
